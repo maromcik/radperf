@@ -6,7 +6,9 @@ use std::{
     time::Duration,
 };
 
-use radius::core::{code::Code, packet::Packet, rfc2865, rfc2869::add_message_authenticator};
+use radius::core::{
+    avp::AVP, code::Code, packet::Packet, rfc2865, rfc2869::add_message_authenticator,
+};
 use tokio::{
     net::UdpSocket,
     task::JoinSet,
@@ -15,7 +17,12 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info};
 
-use crate::{config::AppConfig, error::AppError, utils::fix_message_authenticator};
+use crate::{
+    config::{AppConfig, AuthMethod},
+    error::AppError,
+    mschapv2::{self, Mschapv2Exchange, VENDOR_SPECIFIC_TYPE},
+    utils::fix_message_authenticator,
+};
 
 pub struct PerfTest {
     config: Arc<AppConfig>,
@@ -149,8 +156,8 @@ impl PerfTest {
             // random identifier + request authenticator; the User-Password
             // hiding and Message-Authenticator (both depend on the request
             // authenticator) are recomputed accordingly.
-            let payload = match RadiusPacket::build(&config) {
-                Ok(packet) => packet.payload,
+            let packet = match RadiusPacket::build(&config) {
+                Ok(packet) => packet,
                 Err(e) => {
                     error!("worker {worker_id}: failed to build request packet: {e}");
                     tokio::select! {
@@ -164,7 +171,7 @@ impl PerfTest {
             tokio::select! {
                 biased;
                 _ = cancel.cancelled() => break,
-                outcome = Self::round_trip(&socket, &payload, config.auth.secret.as_bytes(), config.timeout, &mut buf) => {
+                outcome = Self::round_trip(&socket, &packet, config.auth.secret.as_bytes(), config.timeout, &mut buf) => {
                     let back_off = matches!(outcome, RoundTrip::SendError | RoundTrip::RecvError);
                     stats.record(outcome);
                     if back_off {
@@ -185,12 +192,12 @@ impl PerfTest {
     /// per connection).
     async fn round_trip(
         socket: &UdpSocket,
-        payload: &[u8],
+        packet: &RadiusPacket,
         secret: &[u8],
         timeout_dur: Duration,
         buf: &mut [u8],
     ) -> RoundTrip {
-        if let Err(e) = socket.send(payload).await {
+        if let Err(e) = socket.send(&packet.payload).await {
             debug!("send error: {e}");
             return RoundTrip::SendError;
         }
@@ -204,19 +211,39 @@ impl PerfTest {
             Ok(Ok(n)) => {
                 let raw = &buf[..n];
                 if raw.len() < 2
-                    || raw[1] != payload[1] // identifier mismatch
-                    || !Packet::is_authentic_response(raw, payload, secret)
+                    || raw[1] != packet.payload[1] // identifier mismatch
+                    || !Packet::is_authentic_response(raw, &packet.payload, secret)
                 {
                     return RoundTrip::InvalidResponse;
                 }
                 match Code::from(raw[0]) {
-                    Code::AccessAccept | Code::AccessChallenge | Code::AccountingResponse => {
-                        RoundTrip::Success
-                    }
+                    Code::AccessAccept => match &packet.mschap {
+                        Some(exchange) => Self::verify_mschap_success(raw, secret, exchange),
+                        None => RoundTrip::Success,
+                    },
+                    Code::AccessChallenge | Code::AccountingResponse => RoundTrip::Success,
                     Code::AccessReject => RoundTrip::Rejected,
                     _ => RoundTrip::UnexpectedResponse,
                 }
             }
+        }
+    }
+
+    /// An Access-Accept to a MS-CHAPv2 request only counts as success if the
+    /// `MS-CHAP2-Success` authenticator response is valid (i.e. it proves the
+    /// server knew the password).
+    fn verify_mschap_success(raw: &[u8], secret: &[u8], exchange: &Mschapv2Exchange) -> RoundTrip {
+        match Packet::decode(raw, secret) {
+            Ok(response)
+                if mschapv2::verify_success(
+                    &response,
+                    exchange.ident,
+                    &exchange.expected_success_message,
+                ) =>
+            {
+                RoundTrip::Success
+            }
+            _ => RoundTrip::InvalidResponse,
         }
     }
 
@@ -271,6 +298,8 @@ impl PerfTest {
 
 pub struct RadiusPacket {
     pub payload: Vec<u8>,
+    /// Present for `AuthMethod::Mschapv2`; used to verify `MS-CHAP2-Success`.
+    pub mschap: Option<Mschapv2Exchange>,
 }
 
 impl RadiusPacket {
@@ -284,7 +313,24 @@ impl RadiusPacket {
         );
 
         rfc2865::add_user_name(&mut req_packet, config.auth.username.as_str());
-        rfc2865::add_user_password(&mut req_packet, config.auth.password.as_bytes())?;
+        let mschap = match config.auth.method {
+            AuthMethod::Pap => {
+                rfc2865::add_user_password(&mut req_packet, config.auth.password.as_bytes())?;
+                None
+            }
+            AuthMethod::Mschapv2 => {
+                let exchange = Mschapv2Exchange::new(&config.auth.username, &config.auth.password);
+                req_packet.add(AVP::from_bytes(
+                    VENDOR_SPECIFIC_TYPE,
+                    &exchange.challenge_vsa,
+                ));
+                req_packet.add(AVP::from_bytes(
+                    VENDOR_SPECIFIC_TYPE,
+                    &exchange.response_vsa,
+                ));
+                Some(exchange)
+            }
+        };
         if let Some(nas_identifier) = &config.auth.nas_identifier {
             rfc2865::add_nas_identifier(&mut req_packet, nas_identifier.as_str());
         }
@@ -296,7 +342,10 @@ impl RadiusPacket {
         let mut encoded = req_packet.encode()?;
         fix_message_authenticator(&mut encoded, config.auth.secret.as_bytes())?;
 
-        Ok(RadiusPacket { payload: encoded })
+        Ok(RadiusPacket {
+            payload: encoded,
+            mschap,
+        })
     }
 }
 

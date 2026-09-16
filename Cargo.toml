@@ -7,11 +7,15 @@ edition = "2024"
 async-trait = "0.1.92"
 clap = { version = "4.6.7", features = ["derive"] }
 config = { version = "0.15.25", default-features = false, features = ["yaml"] }
+des = "0.8"
 env_logger = "0.11.11"
 humantime-serde = "1.1.1"
 log = "0.4.34"
+md4 = "0.10"
 md5 = "0.7"
 radius = "0.4.0"
+rand = "0.8"
+sha1 = "0.10"
 serde = { version = "1.0.229", features = ["derive"] }
 thiserror = "2.0.20"
 tokio = { version = "1.53.1", features = ["full"] }

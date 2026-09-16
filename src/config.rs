@@ -39,6 +39,19 @@ pub struct AuthConfig {
     pub password: String,
     pub nas_identifier: Option<String>,
     pub packet_type: PacketCode,
+    #[serde(default)]
+    pub method: AuthMethod,
+}
+
+/// Authentication method to put into the request.
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum AuthMethod {
+    /// PAP: plain `User-Password` attribute (RFC 2865 hiding).
+    #[default]
+    Pap,
+    /// MS-CHAPv2 in plain RADIUS via Microsoft VSAs (RFC 2548/2759).
+    Mschapv2,
 }
 
 fn default_interval() -> std::time::Duration {

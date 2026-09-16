@@ -11,6 +11,7 @@ use crate::perf::{PerfTest, RadiusPacket};
 
 mod config;
 mod error;
+mod mschapv2;
 mod perf;
 mod utils;
 
