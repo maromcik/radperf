@@ -1,0 +1,24 @@
+# radperf configuration
+log_level: "info"
+
+# number of parallel connections; each connection gets its own UDP socket
+# and keeps one request in flight at a time
+connections: 100
+
+# how long to wait for a response before the request counts as failed
+timeout: "2s"
+
+# per-connection stats are printed every interval
+interval: "1s"
+
+auth:
+  # RADIUS server to test (ip:port)
+  server: "147.251.6.203:1812"
+  # shared secret -- keep this file private!
+  secret: "<secret>"
+  username: "radtest"
+  password: "<secret>"
+  # optional; remove the line or set to null to omit the attribute
+  # nas_identifier: "test"
+  # AccessRequest or AccountingRequest
+  packet_type: "AccessRequest"
