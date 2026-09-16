@@ -1,0 +1,20 @@
+[package]
+name = "radperf"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+async-trait = "0.1.92"
+clap = { version = "4.6.7", features = ["derive"] }
+config = { version = "0.15.25", default-features = false, features = ["yaml"] }
+env_logger = "0.11.11"
+humantime-serde = "1.1.1"
+log = "0.4.34"
+md5 = "0.7"
+radius = "0.4.0"
+serde = { version = "1.0.229", features = ["derive"] }
+thiserror = "2.0.20"
+tokio = { version = "1.53.1", features = ["full"] }
+tokio-util = "0.7.19"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "local-time"] }
