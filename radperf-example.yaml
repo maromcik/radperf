@@ -13,7 +13,7 @@ interval: "1s"
 
 auth:
   # RADIUS server to test (ip:port)
-  server: "147.251.6.203:1812"
+  server: "<IP>:1812"
   # shared secret -- keep this file private!
   secret: "<secret>"
   username: "radtest"
