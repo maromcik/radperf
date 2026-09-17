@@ -20,6 +20,7 @@ use tracing::{debug, error, info};
 use crate::{
     acct::AcctSession,
     config::{AcctStatusKind, AppConfig, AuthMethod, PacketCode},
+    eap::{self, EapOutcome},
     error::AppError,
     mschapv2::{self, Mschapv2Exchange, VENDOR_SPECIFIC_TYPE},
     utils::fix_message_authenticator,
@@ -130,6 +131,12 @@ impl PerfTest {
         stats: Arc<PerfStats>,
         cancel: CancellationToken,
     ) {
+        if config.auth.method == AuthMethod::PeapMschapv2 {
+            // EAP is driven by external eapol_test processes; no UDP socket
+            // of our own is needed.
+            return Self::eap_worker(worker_id, config, stats, cancel).await;
+        }
+
         let socket = match UdpSocket::bind("0.0.0.0:0").await {
             Ok(socket) => socket,
             Err(e) => {
@@ -367,6 +374,48 @@ impl PerfTest {
         }
     }
 
+    /// EAP worker: repeatedly runs one full PEAP/MSCHAPv2 authentication via
+    /// an external eapol_test process and records the outcome.
+    async fn eap_worker(
+        worker_id: usize,
+        config: std::sync::Arc<AppConfig>,
+        stats: std::sync::Arc<PerfStats>,
+        cancel: CancellationToken,
+    ) {
+        let runner = match eap::EapolTest::prepare(&config, worker_id) {
+            Ok(runner) => runner,
+            Err(e) => {
+                error!("worker {worker_id}: failed to prepare eapol_test: {e}");
+                return;
+            }
+        };
+
+        loop {
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => break,
+                outcome = runner.authenticate(config.timeout, &cancel) => {
+                    let round_trip = match outcome {
+                        EapOutcome::Success => RoundTrip::Success,
+                        EapOutcome::Rejected => RoundTrip::Rejected,
+                        EapOutcome::Timeout => RoundTrip::Timeout,
+                        // backs off below like other transport errors
+                        EapOutcome::Error => RoundTrip::RecvError,
+                        EapOutcome::Cancelled => break,
+                    };
+                    stats.record(round_trip);
+                    if round_trip == RoundTrip::RecvError {
+                        tokio::select! {
+                            biased;
+                            _ = cancel.cancelled() => break,
+                            _ = tokio::time::sleep(Duration::from_millis(100)) => {}
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// An Access-Accept to a MS-CHAPv2 request only counts as success if the
     /// `MS-CHAP2-Success` authenticator response is valid (i.e. it proves the
     /// server knew the password).
@@ -465,6 +514,11 @@ impl RadiusPacket {
                 ));
                 Some(exchange)
             }
+            AuthMethod::PeapMschapv2 => {
+                return Err(AppError::RadiusPacketError(
+                    "PEAP/MSCHAPv2 runs via external eapol_test; no packet to build".to_owned(),
+                ));
+            }
         };
         if let Some(nas_identifier) = &config.nas_identifier {
             rfc2865::add_nas_identifier(&mut req_packet, nas_identifier.as_str());
@@ -484,7 +538,7 @@ impl RadiusPacket {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RoundTrip {
     Success,
     Rejected,

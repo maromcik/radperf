@@ -2,7 +2,7 @@
 log_level: "info"
 
 # number of parallel connections; each connection gets its own UDP socket
-# and keeps one request in flight at a time
+# (or eapol_test process) and keeps one request in flight at a time
 connections: 100
 
 # how long to wait for a response before the request counts as failed
@@ -11,21 +11,23 @@ timeout: "2s"
 # per-connection stats are printed every interval
 interval: "1s"
 
+# RADIUS server to test (ip:port; auth usually 1812, accounting 1813)
+server: "<IP>:1812"
+# shared secret -- keep this file private!
+secret: "<secret>"
+# optional; remove the line or set to null to omit the attribute
+# nas_identifier: "test"
+# AccessRequest or AccountingRequest
+packet_type: "AccessRequest"
+
 auth:
-  # RADIUS server to test (ip:port)
-  server: "<IP>:1812"
-  # shared secret -- keep this file private!
-  secret: "<secret>"
   username: "radtest"
   password: "<secret>"
-  # optional; remove the line or set to null to omit the attribute
-  # nas_identifier: "test"
-  # AccessRequest or AccountingRequest
-  packet_type: "AccessRequest"
-  # "pap" (default, like radtest) or "mschapv2" (like radtest -t mschap)
+  # "pap" (default, like radtest), "mschapv2" (like radtest -t mschap) or
+  # "peap-mschapv2" (full EAP session via external eapol_test, see below)
   method: "pap"
 
-# accounting: only used when auth.packet_type is AccountingRequest
+# accounting: only used when packet_type is AccountingRequest
 accounting:
   # start / interim / stop flood that single record type as fast as possible;
   # cycle (default) simulates full sessions: Start -> paced Interim-Update
@@ -37,3 +39,20 @@ accounting:
   # called_station_id: "02-00-00-00-00-01:eduroam"
   # fixed Framed-IP-Address for all sessions; random 10.x.y.z per session otherwise
   # framed_ip: "10.0.0.1"
+
+# eap: only used when auth.method is "peap-mschapv2".
+# Each worker runs eapol_test repeatedly; every invocation performs one full
+# PEAP TLS handshake + inner MS-CHAPv2 (no session resumption).
+eap:
+  # path to the eapol_test binary (from wpa_supplicant)
+  binary: "eapol_test"
+  # outer identity; omitted when unset
+  # anonymous_identity: "anonymous@example.org"
+  # phase2: "auth=MSCHAPV2"
+  # optional, e.g. "peapver=0" when TLS negotiation quirks appear
+  # phase1: "peapver=0"
+  # extra RADIUS attributes in eapol_test -N syntax (id:syntax:value,
+  # syntax = s string, d integer, x octets)
+  # attrs:
+  #   - "32:s:my-nas-identifier"     # NAS-Identifier
+  #   - "61:d:19"                    # NAS-Port-Type = Wireless-802.11

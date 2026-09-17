@@ -183,6 +183,7 @@ mod tests {
                 called_station_id: Some("02-00-00-00-00-01:eduroam".to_owned()),
                 framed_ip: None,
             },
+            eap: crate::config::EapConfig::default(),
         }
     }
 

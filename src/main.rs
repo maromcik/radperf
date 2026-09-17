@@ -11,6 +11,7 @@ use crate::perf::{PerfTest, RadiusPacket};
 
 mod acct;
 mod config;
+mod eap;
 mod error;
 mod mschapv2;
 mod perf;
@@ -36,9 +37,16 @@ async fn main() -> Result<(), AppError> {
         .with_env_filter(filter)
         .init();
 
-    // validate that the request packet can be built from the config before
-    // starting the test (workers rebuild a fresh packet per request)
-    RadiusPacket::build(&config)?;
+    // validate that the config can actually produce requests before starting
+    // the test (workers rebuild fresh packets / spawn processes per request)
+    if config.auth.method == config::AuthMethod::PeapMschapv2 {
+        eap::check_binary(&config.eap.binary)?;
+    } else if config.packet_type == config::PacketCode::AccountingRequest {
+        acct::AcctSession::new(0, config.accounting.framed_ip)
+            .build_packet(&config, config::AcctStatusKind::Start)?;
+    } else {
+        RadiusPacket::build(&config)?;
+    }
     let test = PerfTest::new(config);
     let cancel = CancellationToken::new();
     let started_at = Instant::now();

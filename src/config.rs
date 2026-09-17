@@ -25,6 +25,8 @@ pub struct AppConfig {
     pub auth: AuthConfig,
     #[serde(default)]
     pub accounting: AcctConfig,
+    #[serde(default)]
+    pub eap: EapConfig,
 }
 
 impl AppConfig {
@@ -110,6 +112,49 @@ pub enum AuthMethod {
     Pap,
     /// MS-CHAPv2 in plain RADIUS via Microsoft VSAs (RFC 2548/2759).
     Mschapv2,
+    /// Full EAP session: PEAP with inner MS-CHAPv2, driven by external
+    /// eapol_test processes (see the `eap` section).
+    #[serde(rename = "peap-mschapv2")]
+    PeapMschapv2,
+}
+
+/// Settings for `AuthMethod::PeapMschapv2` (external eapol_test).
+#[derive(Debug, Clone, Deserialize)]
+pub struct EapConfig {
+    /// Path/name of the eapol_test binary.
+    #[serde(default = "default_eap_binary")]
+    pub binary: String,
+    /// Outer (anonymous) identity; omitted when unset.
+    pub anonymous_identity: Option<String>,
+    /// PEAP phase2, e.g. "auth=MSCHAPV2".
+    #[serde(default = "default_eap_phase2")]
+    pub phase2: String,
+    /// Optional PEAP phase1, e.g. "peapver=0".
+    pub phase1: Option<String>,
+    /// Extra RADIUS attributes in eapol_test -N syntax, e.g.
+    /// "32:s:my-nas" (NAS-Identifier) or "77:d:123".
+    #[serde(default)]
+    pub attrs: Vec<String>,
+}
+
+impl Default for EapConfig {
+    fn default() -> Self {
+        EapConfig {
+            binary: default_eap_binary(),
+            anonymous_identity: None,
+            phase2: default_eap_phase2(),
+            phase1: None,
+            attrs: Vec::new(),
+        }
+    }
+}
+
+fn default_eap_binary() -> String {
+    "eapol_test".to_owned()
+}
+
+fn default_eap_phase2() -> String {
+    "auth=MSCHAPV2".to_owned()
 }
 
 fn default_interval() -> std::time::Duration {
