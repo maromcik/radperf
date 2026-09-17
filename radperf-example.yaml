@@ -22,3 +22,18 @@ auth:
   # nas_identifier: "test"
   # AccessRequest or AccountingRequest
   packet_type: "AccessRequest"
+  # "pap" (default, like radtest) or "mschapv2" (like radtest -t mschap)
+  method: "pap"
+
+# accounting: only used when auth.packet_type is AccountingRequest
+accounting:
+  # start / interim / stop flood that single record type as fast as possible;
+  # cycle (default) simulates full sessions: Start -> paced Interim-Update
+  # every interim_interval -> Stop after session_length, then a new session
+  status_type: "cycle"
+  interim_interval: "10s"
+  session_length: "5m"
+  # Called-Station-Id, e.g. "02-00-00-00-00-01:eduroam"; omitted when unset
+  # called_station_id: "02-00-00-00-00-01:eduroam"
+  # fixed Framed-IP-Address for all sessions; random 10.x.y.z per session otherwise
+  # framed_ip: "10.0.0.1"

@@ -18,7 +18,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info};
 
 use crate::{
-    config::{AppConfig, AuthMethod},
+    acct::AcctSession,
+    config::{AcctStatusKind, AppConfig, AuthMethod, PacketCode},
     error::AppError,
     mschapv2::{self, Mschapv2Exchange, VENDOR_SPECIFIC_TYPE},
     utils::fix_message_authenticator,
@@ -46,10 +47,7 @@ impl PerfTest {
     pub async fn run(&self, cancel: CancellationToken) -> Result<(), AppError> {
         info!(
             "starting {} workers against {} (timeout: {:?}, report interval: {:?})",
-            self.config.connections,
-            self.config.auth.server,
-            self.config.timeout,
-            self.config.interval,
+            self.config.connections, self.config.server, self.config.timeout, self.config.interval,
         );
 
         let mut tasks = JoinSet::new();
@@ -139,12 +137,16 @@ impl PerfTest {
                 return;
             }
         };
-        if let Err(e) = socket.connect(config.auth.server).await {
+        if let Err(e) = socket.connect(config.server).await {
             error!(
                 "worker {worker_id}: failed to connect to {}: {e}",
-                config.auth.server
+                config.server
             );
             return;
+        }
+
+        if config.packet_type == PacketCode::AccountingRequest {
+            return Self::acct_worker(worker_id, config, stats, cancel, socket).await;
         }
 
         let mut buf = vec![0u8; 4096];
@@ -171,10 +173,9 @@ impl PerfTest {
             tokio::select! {
                 biased;
                 _ = cancel.cancelled() => break,
-                outcome = Self::round_trip(&socket, &packet, config.auth.secret.as_bytes(), config.timeout, &mut buf) => {
-                    let back_off = matches!(outcome, RoundTrip::SendError | RoundTrip::RecvError);
+                outcome = Self::round_trip(&socket, &packet.payload, packet.mschap.as_ref(), config.secret.as_bytes(), config.timeout, &mut buf) => {
                     stats.record(outcome);
-                    if back_off {
+                    if matches!(outcome, RoundTrip::SendError | RoundTrip::RecvError) {
                         // transport errors (e.g. ICMP port unreachable) return
                         // immediately; back off briefly to avoid a hot loop
                         tokio::select! {
@@ -189,15 +190,17 @@ impl PerfTest {
     }
 
     /// Sends one request and waits for the response (one outstanding request
-    /// per connection).
+    /// per connection). `mschap` is set for MS-CHAPv2 Access-Requests so that
+    /// the `MS-CHAP2-Success` in an Access-Accept can be verified.
     async fn round_trip(
         socket: &UdpSocket,
-        packet: &RadiusPacket,
+        payload: &[u8],
+        mschap: Option<&Mschapv2Exchange>,
         secret: &[u8],
         timeout_dur: Duration,
         buf: &mut [u8],
     ) -> RoundTrip {
-        if let Err(e) = socket.send(&packet.payload).await {
+        if let Err(e) = socket.send(payload).await {
             debug!("send error: {e}");
             return RoundTrip::SendError;
         }
@@ -211,13 +214,13 @@ impl PerfTest {
             Ok(Ok(n)) => {
                 let raw = &buf[..n];
                 if raw.len() < 2
-                    || raw[1] != packet.payload[1] // identifier mismatch
-                    || !Packet::is_authentic_response(raw, &packet.payload, secret)
+                    || raw[1] != payload[1] // identifier mismatch
+                    || !Packet::is_authentic_response(raw, payload, secret)
                 {
                     return RoundTrip::InvalidResponse;
                 }
                 match Code::from(raw[0]) {
-                    Code::AccessAccept => match &packet.mschap {
+                    Code::AccessAccept => match mschap {
                         Some(exchange) => Self::verify_mschap_success(raw, secret, exchange),
                         None => RoundTrip::Success,
                     },
@@ -225,6 +228,141 @@ impl PerfTest {
                     Code::AccessReject => RoundTrip::Rejected,
                     _ => RoundTrip::UnexpectedResponse,
                 }
+            }
+        }
+    }
+
+    /// Accounting worker. Behaviour depends on `accounting.status_type`:
+    /// `start`/`interim`/`stop` flood that single record type as fast as
+    /// possible; `cycle` simulates full user sessions (Start, paced
+    /// Interim-Updates, Stop, then a fresh session).
+    async fn acct_worker(
+        worker_id: usize,
+        config: Arc<AppConfig>,
+        stats: Arc<PerfStats>,
+        cancel: CancellationToken,
+        socket: UdpSocket,
+    ) {
+        let acct = &config.accounting;
+        match acct.status_type {
+            AcctStatusKind::Cycle => {
+                // session pacing: Start -> Interim every interim_interval ->
+                // Stop at session_length -> new session
+                'sessions: loop {
+                    let session = AcctSession::new(worker_id, acct.framed_ip);
+                    if !Self::acct_send(
+                        &config,
+                        &session,
+                        AcctStatusKind::Start,
+                        &socket,
+                        &stats,
+                        &cancel,
+                    )
+                    .await
+                    {
+                        return;
+                    }
+                    let stop_at = Instant::now() + acct.session_length;
+                    let mut next_interim = Instant::now() + acct.interim_interval;
+                    while next_interim < stop_at {
+                        tokio::select! {
+                            biased;
+                            _ = cancel.cancelled() => break 'sessions,
+                            _ = tokio::time::sleep_until(next_interim) => {}
+                        }
+                        if !Self::acct_send(
+                            &config,
+                            &session,
+                            AcctStatusKind::Interim,
+                            &socket,
+                            &stats,
+                            &cancel,
+                        )
+                        .await
+                        {
+                            return;
+                        }
+                        next_interim += acct.interim_interval;
+                    }
+                    let remaining = stop_at.saturating_duration_since(Instant::now());
+                    if !remaining.is_zero() {
+                        tokio::select! {
+                            biased;
+                            _ = cancel.cancelled() => break 'sessions,
+                            _ = tokio::time::sleep(remaining) => {}
+                        }
+                    }
+                    if !Self::acct_send(
+                        &config,
+                        &session,
+                        AcctStatusKind::Stop,
+                        &socket,
+                        &stats,
+                        &cancel,
+                    )
+                    .await
+                    {
+                        return;
+                    }
+                }
+            }
+            kind => {
+                // flood a single record type
+                let mut fixed_session: Option<AcctSession> = None;
+                loop {
+                    // Start/Stop need a fresh session per record; Interim keeps
+                    // one session alive so counters/timers stay monotonic.
+                    let session = match kind {
+                        AcctStatusKind::Interim => fixed_session
+                            .get_or_insert_with(|| AcctSession::new(worker_id, acct.framed_ip)),
+                        AcctStatusKind::Stop => &*fixed_session.insert(AcctSession::new_aged(
+                            worker_id,
+                            acct.framed_ip,
+                            Duration::from_secs_f64(
+                                rand::random::<f64>() * acct.session_length.as_secs_f64(),
+                            ),
+                        )),
+                        _ => &*fixed_session.insert(AcctSession::new(worker_id, acct.framed_ip)),
+                    };
+                    if !Self::acct_send(&config, session, kind, &socket, &stats, &cancel).await {
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Builds one accounting record, sends it and records the outcome.
+    /// Returns false when the worker should stop (cancelled or fatal error).
+    async fn acct_send(
+        config: &AppConfig,
+        session: &AcctSession,
+        kind: AcctStatusKind,
+        socket: &UdpSocket,
+        stats: &PerfStats,
+        cancel: &CancellationToken,
+    ) -> bool {
+        let payload = match session.build_packet(config, kind) {
+            Ok(payload) => payload,
+            Err(e) => {
+                error!("failed to build accounting packet: {e}");
+                return false;
+            }
+        };
+        let mut buf = vec![0u8; 4096];
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => false,
+            outcome = Self::round_trip(socket, &payload, None, config.secret.as_bytes(), config.timeout, &mut buf) => {
+                stats.record(outcome);
+                if matches!(outcome, RoundTrip::SendError | RoundTrip::RecvError) {
+                    tokio::select! {
+                        biased;
+                        _ = cancel.cancelled() => return false,
+                        _ = tokio::time::sleep(Duration::from_millis(100)) => {}
+                    }
+                }
+                true
             }
         }
     }
@@ -307,10 +445,7 @@ impl RadiusPacket {
     /// reused) so that every request has a unique identifier and request
     /// authenticator — see the comment in `worker`.
     pub fn build(config: &AppConfig) -> Result<RadiusPacket, AppError> {
-        let mut req_packet = Packet::new(
-            config.auth.packet_type.clone().into(),
-            config.auth.secret.as_bytes(),
-        );
+        let mut req_packet = Packet::new(config.packet_type.into(), config.secret.as_bytes());
 
         rfc2865::add_user_name(&mut req_packet, config.auth.username.as_str());
         let mschap = match config.auth.method {
@@ -331,7 +466,7 @@ impl RadiusPacket {
                 Some(exchange)
             }
         };
-        if let Some(nas_identifier) = &config.auth.nas_identifier {
+        if let Some(nas_identifier) = &config.nas_identifier {
             rfc2865::add_nas_identifier(&mut req_packet, nas_identifier.as_str());
         }
         rfc2865::add_nas_port(&mut req_packet, 0);
@@ -340,7 +475,7 @@ impl RadiusPacket {
         add_message_authenticator(&mut req_packet, &[0u8; 16]);
 
         let mut encoded = req_packet.encode()?;
-        fix_message_authenticator(&mut encoded, config.auth.secret.as_bytes())?;
+        fix_message_authenticator(&mut encoded, config.secret.as_bytes())?;
 
         Ok(RadiusPacket {
             payload: encoded,

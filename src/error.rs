@@ -2,7 +2,7 @@ use radius::core::{avp::AVPError, packet::PacketError};
 use std::fmt::Debug;
 use thiserror::Error;
 
-#[allow(clippy::enum_variant_names)]
+#[allow(clippy::enum_variant_names, dead_code)]
 #[derive(Error, Clone, PartialEq, Eq)]
 pub enum AppError {
     #[error("request error: {0}")]

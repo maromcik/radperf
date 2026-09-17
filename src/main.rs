@@ -9,6 +9,7 @@ use crate::config::AppConfig;
 use crate::error::AppError;
 use crate::perf::{PerfTest, RadiusPacket};
 
+mod acct;
 mod config;
 mod error;
 mod mschapv2;

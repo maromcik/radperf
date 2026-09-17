@@ -1,4 +1,7 @@
-use std::{net::SocketAddr, time::Duration};
+use std::{
+    net::{Ipv4Addr, SocketAddr},
+    time::Duration,
+};
 
 use config::Config;
 use serde::Deserialize;
@@ -15,7 +18,13 @@ pub struct AppConfig {
     #[serde(default = "default_interval")]
     #[serde(with = "humantime_serde")]
     pub interval: Duration,
+    pub server: SocketAddr,
+    pub secret: String,
+    pub nas_identifier: Option<String>,
+    pub packet_type: PacketCode,
     pub auth: AuthConfig,
+    #[serde(default)]
+    pub accounting: AcctConfig,
 }
 
 impl AppConfig {
@@ -33,14 +42,63 @@ impl AppConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct AuthConfig {
-    pub server: SocketAddr,
-    pub secret: String,
     pub username: String,
     pub password: String,
-    pub nas_identifier: Option<String>,
-    pub packet_type: PacketCode,
     #[serde(default)]
     pub method: AuthMethod,
+}
+
+/// Accounting behaviour (used when `auth.packet_type` is `AccountingRequest`).
+#[derive(Debug, Clone, Deserialize)]
+pub struct AcctConfig {
+    /// Which records to emit:
+    /// `start` / `interim` / `stop` flood that single record type as fast as
+    /// possible; `cycle` simulates full sessions (Start -> paced Interim-Update
+    /// every `interim_interval` -> Stop after `session_length`, then a new
+    /// session).
+    #[serde(default)]
+    pub status_type: AcctStatusKind,
+    #[serde(default = "default_interim_interval")]
+    #[serde(with = "humantime_serde")]
+    pub interim_interval: Duration,
+    #[serde(default = "default_session_length")]
+    #[serde(with = "humantime_serde")]
+    pub session_length: Duration,
+    /// Called-Station-Id (e.g. "02-00-00-00-00-01:eduroam"); omitted when unset.
+    pub called_station_id: Option<String>,
+    /// Fixed Framed-IP-Address for all sessions; random 10.x.y.z per session
+    /// when unset.
+    pub framed_ip: Option<Ipv4Addr>,
+}
+
+impl Default for AcctConfig {
+    fn default() -> Self {
+        AcctConfig {
+            status_type: AcctStatusKind::default(),
+            interim_interval: default_interim_interval(),
+            session_length: default_session_length(),
+            called_station_id: None,
+            framed_ip: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum AcctStatusKind {
+    Start,
+    Interim,
+    Stop,
+    #[default]
+    Cycle,
+}
+
+fn default_interim_interval() -> Duration {
+    Duration::from_secs(10)
+}
+
+fn default_session_length() -> Duration {
+    Duration::from_secs(300)
 }
 
 /// Authentication method to put into the request.
@@ -62,45 +120,21 @@ fn default_timeout() -> std::time::Duration {
     Duration::from_secs(5)
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
 pub enum PacketCode {
     AccessRequest,
-    AccessAccept,
-    AccessReject,
     AccountingRequest,
-    AccountingResponse,
-    AccessChallenge,
-    StatusServer,
-    StatusClient,
     DisconnectRequest,
-    DisconnectACK,
-    DisconnectNAK,
     CoARequest,
-    CoAACK,
-    CoANAK,
-    Reserved,
-    Invalid,
 }
 
 impl From<PacketCode> for radius::core::code::Code {
     fn from(packet_type: PacketCode) -> Self {
         match packet_type {
             PacketCode::AccessRequest => radius::core::code::Code::AccessRequest,
-            PacketCode::AccessAccept => radius::core::code::Code::AccessAccept,
-            PacketCode::AccessReject => radius::core::code::Code::AccessReject,
             PacketCode::AccountingRequest => radius::core::code::Code::AccountingRequest,
-            PacketCode::AccountingResponse => radius::core::code::Code::AccountingResponse,
-            PacketCode::AccessChallenge => radius::core::code::Code::AccessChallenge,
-            PacketCode::StatusServer => radius::core::code::Code::StatusServer,
-            PacketCode::StatusClient => radius::core::code::Code::StatusClient,
             PacketCode::DisconnectRequest => radius::core::code::Code::DisconnectRequest,
-            PacketCode::DisconnectACK => radius::core::code::Code::DisconnectACK,
-            PacketCode::DisconnectNAK => radius::core::code::Code::DisconnectNAK,
             PacketCode::CoARequest => radius::core::code::Code::CoARequest,
-            PacketCode::CoAACK => radius::core::code::Code::CoAACK,
-            PacketCode::CoANAK => radius::core::code::Code::CoANAK,
-            PacketCode::Reserved => radius::core::code::Code::Reserved,
-            PacketCode::Invalid => radius::core::code::Code::Invalid,
         }
     }
 }

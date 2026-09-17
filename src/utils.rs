@@ -22,6 +22,29 @@ fn hmac_md5(key: &[u8], msg: &[u8]) -> [u8; 16] {
     md5::compute([opad, inner.to_vec()].concat()).0
 }
 
+/// Recomputes the Request Authenticator of an encoded Accounting-Request in
+/// place.
+///
+/// RFC 2866: unlike Access-Request (random), the authenticator is
+/// MD5(Code+ID+Length+16 zero octets+Attributes+Secret). The `radius` crate
+/// fills it with random bytes, and FreeRADIUS drops packets with an invalid
+/// signature, so we fix it after encoding.
+pub fn fix_accounting_authenticator(encoded: &mut [u8], secret: &[u8]) -> Result<(), AppError> {
+    if encoded.len() < RADIUS_HEADER_LEN {
+        return Err(AppError::RadiusPacketError(
+            "packet shorter than RADIUS header".to_owned(),
+        ));
+    }
+    let mut ctx = md5::Context::new();
+    ctx.consume(&encoded[..4]);
+    ctx.consume([0u8; 16]);
+    ctx.consume(&encoded[RADIUS_HEADER_LEN..]);
+    ctx.consume(secret);
+    let digest = ctx.compute();
+    encoded[4..RADIUS_HEADER_LEN].copy_from_slice(&digest.0);
+    Ok(())
+}
+
 /// Recomputes the Message-Authenticator of an encoded Access-Request in place.
 ///
 /// RFC 3579: the value is HMAC-MD5 over the entire packet (with the
